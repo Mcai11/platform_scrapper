@@ -103,8 +103,9 @@ def _fmt_dt(ts: float) -> str:
 
 app = FastAPI(title="Flow Scrapper Dashboard")
 
-# In-memory login job store (best-effort, per server process)
+# In-memory job stores (best-effort, per server process)
 LOGIN_JOBS: dict[str, dict[str, Any]] = {}
+SCRAPE_JOBS: dict[str, dict[str, Any]] = {}
 
 
 def _env_path() -> Path:
@@ -638,6 +639,47 @@ def index(date: str | None = None, region: str | None = None, scrape_country: st
         setTimeout(() => window.location.reload(), 800);
       }}
     }});
+    const statusEl = document.createElement('div');
+    statusEl.id = 'scrapeStatus';
+    statusEl.style.margin = '10px 0 0';
+    statusEl.style.fontSize = '12px';
+    statusEl.style.color = 'var(--muted)';
+    document.querySelector('.wrap').insertBefore(statusEl, document.querySelector('.wrap').firstChild);
+
+    let statusTimer = null;
+    function renderStatus(jobs) {{
+      if (!statusEl) return;
+      const keys = Object.keys(jobs || {{}});
+      if (!keys.length) {{
+        statusEl.textContent = '';
+        return;
+      }}
+      const parts = [];
+      keys.forEach(k => {{
+        const j = jobs[k] || {{}};
+        const state = j.state || 'unknown';
+        const msg = j.message || '';
+        parts.push(k + ': ' + state + (msg ? (' - ' + msg) : ''));
+      }});
+      statusEl.textContent = 'Scrape status: ' + parts.join(' | ');
+    }}
+
+    function pollStatusOnce() {{
+      fetch('/api/scrape/status')
+        .then(r => r.json())
+        .then(data => renderStatus(data.jobs))
+        .catch(() => {{}});
+    }}
+
+    function startPollingStatus() {{
+      if (statusTimer) window.clearInterval(statusTimer);
+      pollStatusOnce();
+      statusTimer = window.setInterval(pollStatusOnce, 3000);
+    }}
+
+    // 初始也拉一次，方便看到最近一次抓取结果
+    startPollingStatus();
+
     btn.addEventListener('click', () => {{
       const payload = {{
         country: scrapeRegion.value || 'US',
@@ -647,6 +689,8 @@ def index(date: str | None = None, region: str | None = None, scrape_country: st
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
         body: JSON.stringify(payload)
+      }}).then(() => {{
+        startPollingStatus();
       }}).finally(() => {{
         // 给爬虫一点时间，然后带参数刷新
         setTimeout(goView, 8000);
@@ -685,21 +729,48 @@ def api_latest(platform: str, date: str | None = None, region: str | None = None
 
 
 def _run_scrape_in_background(country: str, platforms: list[str]) -> None:
-    """Fire-and-forget 调用 main.py 进行抓取（在后台线程里顺序执行）。"""
+    """Fire-and-forget 调用 main.py 进行抓取（在后台线程里顺序执行），并在内存中记录状态。"""
     import threading
     import subprocess
     import sys
+    import time
 
     country_code = (country or "US").upper()
     plats = [p for p in platforms if p in PLATFORMS or p == "all"]
 
     def _worker() -> None:
         for p in plats:
+            start_ts = time.time()
+            SCRAPE_JOBS[p] = {
+                "state": "running",
+                "country": country_code,
+                "started_at": start_ts,
+                "finished_at": None,
+                "exit_code": None,
+                "message": "",
+            }
             cmd = [sys.executable, "main.py", "--platform", p, "--country", country_code]
             try:
-                subprocess.run(cmd, cwd=str(APP_ROOT), check=False)
-            except Exception:
-                continue
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(APP_ROOT),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                SCRAPE_JOBS[p]["exit_code"] = proc.returncode
+                SCRAPE_JOBS[p]["finished_at"] = time.time()
+                if proc.returncode == 0:
+                    SCRAPE_JOBS[p]["state"] = "done"
+                    SCRAPE_JOBS[p]["message"] = (proc.stdout or "").splitlines()[-1][:300] if proc.stdout else ""
+                else:
+                    SCRAPE_JOBS[p]["state"] = "error"
+                    msg = proc.stderr or proc.stdout or ""
+                    SCRAPE_JOBS[p]["message"] = msg.strip().splitlines()[-1][:300] if msg else "Exited with code {proc.returncode}"
+            except Exception as e:
+                SCRAPE_JOBS[p]["state"] = "error"
+                SCRAPE_JOBS[p]["finished_at"] = time.time()
+                SCRAPE_JOBS[p]["message"] = str(e)[:300]
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -711,6 +782,12 @@ def api_scrape(payload: dict[str, Any]) -> dict[str, Any]:
     platforms = payload.get("platforms") or ["tiktok", "x", "reddit", "youtube", "google_trends"]
     _run_scrape_in_background(country, platforms)
     return {"ok": True, "country": country, "platforms": platforms}
+
+
+@app.get("/api/scrape/status")
+def api_scrape_status() -> dict[str, Any]:
+    """返回最近一次抓取任务的状态（内存中的 best-effort 信息）。"""
+    return {"jobs": SCRAPE_JOBS}
 
 
 @app.post("/api/login/tiktok")
