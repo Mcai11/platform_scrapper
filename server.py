@@ -7,6 +7,7 @@ plus JSON endpoints for programmatic access.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,135 @@ app = FastAPI(title="Flow Scrapper Dashboard")
 
 # In-memory login job store (best-effort, per server process)
 LOGIN_JOBS: dict[str, dict[str, Any]] = {}
+
+
+def _env_path() -> Path:
+    return APP_ROOT / ".env"
+
+
+def _read_env_file() -> dict[str, str]:
+    p = _env_path()
+    if not p.exists():
+        return {}
+    out: dict[str, str] = {}
+    for raw in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def _write_env_file(values: dict[str, str]) -> None:
+    # Overwrite with only known keys (keep it simple, avoid leaking/merging unknown values).
+    keys = ["YOUTUBE_API_KEY", "APIFY_TOKEN"]
+    lines = ["# Local secrets (do NOT commit this file)"]
+    for k in keys:
+        v = (values.get(k) or "").strip()
+        if not v:
+            continue
+        lines.append(f"{k}={v}")
+    _env_path().write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings() -> str:
+    existing = _read_env_file()
+    yt = existing.get("YOUTUBE_API_KEY", "")
+    apify = existing.get("APIFY_TOKEN", "")
+    # Mask for display (don’t show full secret)
+    def mask(s: str) -> str:
+        s = s or ""
+        if len(s) <= 6:
+            return "*" * len(s)
+        return s[:3] + "*" * (len(s) - 6) + s[-3:]
+
+    return f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Settings</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {{ margin:0; font-family:\"Plus Jakarta Sans\",system-ui,Segoe UI,Arial; background:#0b0b12; color:#e9eaf2; }}
+    .wrap {{ max-width: 920px; margin: 0 auto; padding: 22px 18px 46px; }}
+    .card {{ border:1px solid rgba(255,255,255,.10); border-radius: 16px; background: rgba(255,255,255,.04); padding: 16px; }}
+    label {{ display:block; font-size: 12px; color: rgba(233,234,242,.70); margin: 12px 0 6px; }}
+    input {{ width: 100%; padding: 10px 12px; border-radius: 12px; border:1px solid rgba(255,255,255,.14); background: rgba(0,0,0,.18); color:#fff; }}
+    .row {{ display:flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }}
+    .btn {{ padding: 10px 12px; border-radius: 12px; border: 0; background: #9a7bff; color:#0b0b12; font-weight: 800; cursor:pointer; }}
+    .btn.secondary {{ background: rgba(255,255,255,.08); color:#e9eaf2; border:1px solid rgba(255,255,255,.14); }}
+    .hint {{ margin-top: 8px; font-size: 12.5px; color: rgba(233,234,242,.62); }}
+    code {{ background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.10); padding: 2px 6px; border-radius: 10px; color: #e9eaf2; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2 style="margin:0 0 14px;">Settings</h2>
+    <div class="card">
+      <div class="hint">These keys are saved to <code>.env</code> next to the app. They are local-only and should never be committed.</div>
+      <label>YouTube API key (YOUTUBE_API_KEY)</label>
+      <input id="yt" placeholder="AIza..." value="{mask(yt)}"/>
+      <label>Apify token (APIFY_TOKEN) (optional)</label>
+      <input id="apify" placeholder="apify_api_..." value="{mask(apify)}"/>
+      <div class="row">
+        <button class="btn" id="save">Save</button>
+        <a class="btn secondary" href="/">Back</a>
+      </div>
+      <div class="hint" id="msg"></div>
+    </div>
+  </div>
+  <script>
+    const msg = document.getElementById('msg');
+    const yt = document.getElementById('yt');
+    const apify = document.getElementById('apify');
+    document.getElementById('save').addEventListener('click', async () => {{
+      msg.textContent = 'Saving...';
+      const res = await fetch('/api/settings', {{
+        method:'POST',
+        headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{ YOUTUBE_API_KEY: yt.value, APIFY_TOKEN: apify.value }})
+      }});
+      const data = await res.json();
+      msg.textContent = data.ok ? 'Saved. You can run scrapes now.' : ('Error: ' + (data.error || 'unknown'));
+    }});
+  </script>
+</body>
+</html>
+"""
+
+
+@app.post("/api/settings")
+def api_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    # If the user pasted a masked value, we treat it as "no change".
+    existing = _read_env_file()
+    def normalize(key: str) -> str:
+        raw = str(payload.get(key) or "").strip()
+        # masked display contains '*' so ignore it
+        if "*" in raw:
+            return existing.get(key, "")
+        return raw
+
+    values = {
+        "YOUTUBE_API_KEY": normalize("YOUTUBE_API_KEY"),
+        "APIFY_TOKEN": normalize("APIFY_TOKEN"),
+    }
+    try:
+        _write_env_file(values)
+        # Apply to current process immediately
+        for k, v in values.items():
+            if v:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -367,6 +497,7 @@ def index(date: str | None = None, region: str | None = None, scrape_country: st
         <span class="status" title="TikTok session file: sessions/tiktok.json" style="color:{tt_status_color}"><span class="dot"></span>{tt_status}</span>
         <button class="btn secondary" id="loginRd">Login Reddit</button>
         <span class="status" title="Reddit session file: sessions/reddit.json" style="color:{rd_status_color}"><span class="dot"></span>{rd_status}</span>
+        <a class="btn secondary" href="/settings">Settings</a>
         <button class="btn" id="refresh">Run scrape</button>
       </div>
     </div>
