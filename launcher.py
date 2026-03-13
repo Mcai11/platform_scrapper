@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -11,6 +13,45 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+APP_PORT = 8013
+
+
+def _free_port_windows(port: int) -> None:
+    """Kill any process listening on `port` so the app can bind (Windows)."""
+    if sys.platform != "win32":
+        return
+    try:
+        out = subprocess.run(
+            "netstat -ano",
+            shell=True,
+            capture_output=True,
+            timeout=10,
+        )
+        if out.returncode != 0:
+            return
+        stdout = (out.stdout or b"").decode("utf-8", errors="replace")
+        pattern = re.compile(rf":{port}\s+\S+\s+LISTENING\s+(\d+)")
+        pids_to_kill = []
+        for line in stdout.splitlines():
+            m = pattern.search(line)
+            if m:
+                pid = int(m.group(1))
+                if pid > 0:
+                    pids_to_kill.append(pid)
+        for pid in pids_to_kill:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    capture_output=True,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+        if pids_to_kill:
+            time.sleep(1.0)
+    except Exception:
+        pass
 
 
 REPO = "Mcai11/platform_scrapper"
@@ -121,6 +162,7 @@ def _atomic_replace_dir(src_dir: Path, dst_dir: Path) -> None:
 
 
 def _launch_app(app_dir: Path) -> None:
+    _free_port_windows(APP_PORT)
     exe = app_dir / "platform_scrapper.exe"
     if not exe.exists():
         # dev fallback: run python entry
