@@ -33,6 +33,23 @@ AUTH_COOKIES = {
 }
 
 
+def _log_line(msg: str) -> None:
+    """Best-effort append to sessions/login-debug.log for troubleshooting."""
+    try:
+        # In frozen builds, __file__ points into the temp _MEI folder.
+        # Always prefer a stable location next to the exe.
+        base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+        sessions_dir = base / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        log_path = sessions_dir / "login-debug.log"
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        # Logging must never break login flow.
+        return
+
+
 def login_and_save_session(
     *,
     platform: str,
@@ -51,15 +68,20 @@ def login_and_save_session(
     if platform not in LOGIN_URLS:
         raise ValueError(f"Unsupported platform: {platform}")
 
+    _log_line(f"start login platform={platform}, save_path={save_path}, headless={headless}, interactive={interactive}")
+
     # Prefer a bundled browsers directory (for portable builds) so end users
     # do not need a separate `playwright install` step.
-    bundled = Path(__file__).resolve().parent / "ms-playwright"
+    base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    bundled = base / "ms-playwright"
     if bundled.exists():
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(bundled))
+        _log_line(f"using bundled PLAYWRIGHT_BROWSERS_PATH={bundled}")
 
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:
+        _log_line(f"ImportError playwright: {e}")
         raise RuntimeError("Playwright is not installed. Run: pip install playwright") from e
 
     url = LOGIN_URLS[platform]
@@ -69,40 +91,74 @@ def login_and_save_session(
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     detected = False
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            locale="en-US",
-        )
-        page = context.new_page()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            if interactive and not headless:
-                print(f"[{platform}] Browser opened for login: {url}")
-                print(f"[{platform}] After you finish login, come back here and press Enter to save the session.")
+    try:
+        with sync_playwright() as p:
+            _log_line("sync_playwright() entered")
+            browser = None
+            launch_errors: list[str] = []
+            # Try bundled Playwright Chromium first, then system browsers.
+            for label, kwargs in [
+                ("chromium(default)", {"headless": headless}),
+                ("chromium(channel=msedge)", {"headless": headless, "channel": "msedge"}),
+                ("chromium(channel=chrome)", {"headless": headless, "channel": "chrome"}),
+            ]:
                 try:
-                    _ = sys.stdin.readline()
-                except Exception:
-                    pass
-            else:
-                # Give user time to complete login manually.
-                end = time.time() + timeout_s
-                while time.time() < end:
-                    cookies = context.cookies()
-                    names = {c.get('name') for c in cookies}
-                    if expected and (expected & names):
-                        detected = True
-                        break
-                    time.sleep(2)
+                    _log_line(f"trying launch {label}")
+                    browser = p.chromium.launch(**kwargs)
+                    _log_line(f"launch ok: {label}")
+                    break
+                except Exception as e:
+                    msg = f"{label}: {e}"
+                    launch_errors.append(msg)
+                    _log_line(f"launch failed: {msg}")
 
-            cookies = context.cookies()
-            names = {c.get('name') for c in cookies}
-            if expected and (expected & names):
-                detected = True
-        finally:
-            context.storage_state(path=str(save_path))
-            browser.close()
+            if browser is None:
+                raise RuntimeError("All browser launch attempts failed: " + " | ".join(launch_errors))
+
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 720},
+                locale="en-US",
+            )
+            page = context.new_page()
+            try:
+                _log_line(f"goto {url}")
+                page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                _log_line("page.goto() ok")
+                if interactive and not headless:
+                    print(f"[{platform}] Browser opened for login: {url}")
+                    print(f"[{platform}] After you finish login, come back here and press Enter to save the session.")
+                    try:
+                        _ = sys.stdin.readline()
+                    except Exception:
+                        pass
+                else:
+                    # Give user time to complete login manually.
+                    end = time.time() + timeout_s
+                    while time.time() < end:
+                        cookies = context.cookies()
+                        names = {c.get('name') for c in cookies}
+                        if expected and (expected & names):
+                            detected = True
+                            _log_line(f"detected auth cookies: {expected & names}")
+                            break
+                        time.sleep(2)
+
+                cookies = context.cookies()
+                names = {c.get('name') for c in cookies}
+                if expected and (expected & names):
+                    detected = True
+                    _log_line(f"detected auth cookies at end: {expected & names}")
+            finally:
+                try:
+                    context.storage_state(path=str(save_path))
+                    _log_line(f"storage_state saved to {save_path}")
+                except Exception as e:
+                    _log_line(f"storage_state error: {e}")
+                browser.close()
+                _log_line("browser.close() called")
+    except Exception as e:
+        _log_line(f"EXCEPTION in login_and_save_session: {e}")
+        raise
 
     return detected
 

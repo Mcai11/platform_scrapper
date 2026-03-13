@@ -10,13 +10,14 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+import sys
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
 
-APP_ROOT = Path(__file__).resolve().parent
+APP_ROOT = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent)
 OUTPUT_DIR = APP_ROOT / "output"
 SESSIONS_DIR = APP_ROOT / "sessions"
 TIKTOK_SESSION_PATH = SESSIONS_DIR / "tiktok.json"
