@@ -70,14 +70,6 @@ def login_and_save_session(
 
     _log_line(f"start login platform={platform}, save_path={save_path}, headless={headless}, interactive={interactive}")
 
-    # Prefer a bundled browsers directory (for portable builds) so end users
-    # do not need a separate `playwright install` step.
-    base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-    bundled = base / "ms-playwright"
-    if bundled.exists():
-        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(bundled))
-        _log_line(f"using bundled PLAYWRIGHT_BROWSERS_PATH={bundled}")
-
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:
@@ -94,26 +86,20 @@ def login_and_save_session(
     try:
         with sync_playwright() as p:
             _log_line("sync_playwright() entered")
+            # Use system Microsoft Edge so we don't have to ship Chromium.
             browser = None
             launch_errors: list[str] = []
-            # Try bundled Playwright Chromium first, then system browsers.
-            for label, kwargs in [
-                ("chromium(default)", {"headless": headless}),
-                ("chromium(channel=msedge)", {"headless": headless, "channel": "msedge"}),
-                ("chromium(channel=chrome)", {"headless": headless, "channel": "chrome"}),
-            ]:
-                try:
-                    _log_line(f"trying launch {label}")
-                    browser = p.chromium.launch(**kwargs)
-                    _log_line(f"launch ok: {label}")
-                    break
-                except Exception as e:
-                    msg = f"{label}: {e}"
-                    launch_errors.append(msg)
-                    _log_line(f"launch failed: {msg}")
+            try:
+                _log_line("trying launch chromium(channel=msedge)")
+                browser = p.chromium.launch(headless=headless, channel="msedge")
+                _log_line("launch ok: chromium(channel=msedge)")
+            except Exception as e:
+                msg = f"chromium(channel=msedge): {e}"
+                launch_errors.append(msg)
+                _log_line(f"launch failed: {msg}")
 
             if browser is None:
-                raise RuntimeError("All browser launch attempts failed: " + " | ".join(launch_errors))
+                raise RuntimeError("Edge launch failed: " + " | ".join(launch_errors))
 
             context = browser.new_context(
                 viewport={"width": 1280, "height": 720},

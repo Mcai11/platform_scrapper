@@ -39,11 +39,5 @@ Copy-Item ".\browser_auth.py" (Join-Path $OutDir "app\browser_auth.py")
 Copy-Item ".\app_version.py" (Join-Path $OutDir "app\app_version.py")
 Copy-Item ".\requirements.txt" (Join-Path $OutDir "app\requirements.txt")
 
-# Bundle Playwright browser binaries so end users don't need Python.
-$pwBrowsers = Join-Path $env:USERPROFILE "AppData\Local\ms-playwright"
-if (Test-Path $pwBrowsers) {
-  Copy-Item $pwBrowsers (Join-Path $OutDir "app\ms-playwright") -Recurse
-}
-
 Write-Host "Built portable package at $OutDir"
 
