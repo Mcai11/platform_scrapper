@@ -129,8 +129,16 @@ def _launch_app(app_dir: Path) -> None:
 
 
 def main() -> None:
-    base_dir = Path(sys.executable).resolve().parent
     app_dir = _app_dir()
+
+    # Fast path for portable builds: if packed app already exists locally,
+    # launch it directly without doing any network / update checks.
+    exe = app_dir / "platform_scrapper.exe"
+    if exe.exists():
+        _launch_app(app_dir)
+        return
+
+    base_dir = Path(sys.executable).resolve().parent
 
     # If no app installed yet, force update/install.
     local_v = _read_local_version(app_dir)

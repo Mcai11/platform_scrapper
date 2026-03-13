@@ -13,15 +13,16 @@ python -m pip install pyinstaller | Out-Null
 # Build app exe
 pyinstaller --noconfirm --clean --onefile --name platform_scrapper app_entry.py
 
-# Build launcher exe
-pyinstaller --noconfirm --clean --onefile --name Launcher launcher.py
+# Build launcher exe (use onedir to avoid embedded-python issues)
+pyinstaller --noconfirm --clean --onedir --name Launcher launcher.py
 
-# Prepare portable folder
-if (Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
-New-Item -ItemType Directory -Path $OutDir | Out-Null
+# Prepare portable folder (clean contents but keep root to avoid lock errors)
+if (Test-Path $OutDir) { Remove-Item -Recurse -Force (Join-Path $OutDir "*") }
+else { New-Item -ItemType Directory -Path $OutDir | Out-Null }
 New-Item -ItemType Directory -Path (Join-Path $OutDir "app") | Out-Null
 
-Copy-Item ".\dist\Launcher.exe" (Join-Path $OutDir "Launcher.exe")
+# Copy full launcher onedir (Launcher.exe + its Python runtime)
+Copy-Item ".\dist\Launcher\*" $OutDir -Recurse
 Copy-Item ".\dist\platform_scrapper.exe" (Join-Path $OutDir "app\platform_scrapper.exe")
 
 # Ship required runtime files alongside the app (so it can run from any folder)
