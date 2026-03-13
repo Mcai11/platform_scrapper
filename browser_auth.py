@@ -6,6 +6,7 @@ to a JSON file for later reuse by scrapers.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -49,6 +50,12 @@ def login_and_save_session(
     platform = platform.strip().lower()
     if platform not in LOGIN_URLS:
         raise ValueError(f"Unsupported platform: {platform}")
+
+    # Prefer a bundled browsers directory (for portable builds) so end users
+    # do not need a separate `playwright install` step.
+    bundled = Path(__file__).resolve().parent / "ms-playwright"
+    if bundled.exists():
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(bundled))
 
     try:
         from playwright.sync_api import sync_playwright
