@@ -27,7 +27,9 @@ AUTH_COOKIES = {
     # TikTok Creative Center 登录 cookie 名不固定，这里不强依赖，只保存 storage_state 供后续复用。
     "tiktok": set(),
     # X / Twitter 常见登录 cookie
-    "x": {"auth_token"},
+    # Cookie names vary by login flow / account status; include common ones
+    # to reduce the chance we wait for a cookie that never appears.
+    "x": {"auth_token", "twid", "ct0"},
     # Reddit 登录 cookie（名字可能略有变化，这里做 best-effort 检测）
     "reddit": {"reddit_session"},
 }
@@ -120,14 +122,60 @@ def login_and_save_session(
                 else:
                     # Give user time to complete login manually.
                     end = time.time() + timeout_s
+                    last_log = 0.0
+                    last_save = 0.0
                     while time.time() < end:
                         cookies = context.cookies()
                         names = {c.get('name') for c in cookies}
+                        # For X (and other sites), user may finish login and land
+                        # on a URL that no longer contains "login". This makes
+                        # completion less dependent on exact cookie naming.
+                        if platform in ("x", "reddit"):
+                            try:
+                                cur = (page.url or "").lower()
+                                now = time.time()
+                                if now - last_log > 15:
+                                    # Periodic debug to understand whether login actually progresses.
+                                    _log_line(
+                                        f"wait loop: platform={platform}, page.url={page.url}, cookie_names_count={len(names)}"
+                                    )
+                                    last_log = now
+                                if "login" not in cur and cur:
+                                    detected = True
+                                    _log_line(f"url indicates logged in: {cur}")
+                                    break
+                            except Exception:
+                                pass
+
                         if expected and (expected & names):
                             detected = True
                             _log_line(f"detected auth cookies: {expected & names}")
                             break
                         time.sleep(2)
+                        # Periodically persist storage_state so sessions can still be saved
+                        # even if our success-detection is conservative.
+                        try:
+                            now = time.time()
+                            if now - last_save > 20:
+                                context.storage_state(path=str(save_path))
+                                last_save = now
+                                _log_line(f"periodic storage_state saved to {save_path}")
+                        except Exception:
+                            pass
+
+                # Final diagnostics (helps figure out why login never completes).
+                try:
+                    final_url = page.url
+                except Exception:
+                    final_url = None
+                try:
+                    final_cookies = context.cookies()
+                    final_names = sorted({c.get('name') for c in final_cookies if c.get('name')})
+                except Exception:
+                    final_names = []
+                _log_line(
+                    f"login loop end: detected={detected}, final_url={final_url}, final_cookie_names_sample={final_names[:20]}"
+                )
 
                 cookies = context.cookies()
                 names = {c.get('name') for c in cookies}
